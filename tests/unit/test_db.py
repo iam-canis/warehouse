@@ -136,7 +136,7 @@ def test_create_session(monkeypatch, pyramid_services):
         close=pretend.call_recorder(lambda: None),
         get=pretend.call_recorder(lambda *a: None),
     )
-    session_cls = pretend.call_recorder(lambda bind: session_obj)
+    session_cls = pretend.call_recorder(lambda bind, future=False: session_obj)
     monkeypatch.setattr(db, "Session", session_cls)
 
     connection = pretend.stub(
@@ -159,7 +159,7 @@ def test_create_session(monkeypatch, pyramid_services):
     monkeypatch.setattr(zope.sqlalchemy, "register", register)
 
     assert _create_session(request) is session_obj
-    assert session_cls.calls == [pretend.call(bind=connection)]
+    assert session_cls.calls == [pretend.call(bind=connection, future=True)]
     assert register.calls == [pretend.call(session_obj, transaction_manager=request.tm)]
     assert request.add_finished_callback.calls == [pretend.call(mock.ANY)]
     request.add_finished_callback.calls[0].args[0](request2)
@@ -191,7 +191,7 @@ def test_create_session_read_only_mode(
 ):
     get = pretend.call_recorder(lambda *a: admin_flag)
     session_obj = pretend.stub(close=lambda: None, get=get)
-    session_cls = pretend.call_recorder(lambda bind: session_obj)
+    session_cls = pretend.call_recorder(lambda bind, future=False: session_obj)
     monkeypatch.setattr(db, "Session", session_cls)
 
     register = pretend.call_recorder(lambda session, transaction_manager: None)
@@ -216,6 +216,7 @@ def test_create_session_read_only_mode(
     )
 
     assert _create_session(request) is session_obj
+    assert session_cls.calls == [pretend.call(bind=connection, future=True)]
     assert get.calls == [pretend.call(AdminFlag, AdminFlagValue.READ_ONLY.value)]
     assert request.tm.doom.calls == doom_calls
 

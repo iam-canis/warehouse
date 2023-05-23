@@ -138,7 +138,7 @@ def _create_session(request):
         raise DatabaseNotAvailableError()
 
     # Now, create a session from our connection
-    session = Session(bind=connection)
+    session = Session(bind=connection, future=True)
 
     # Register only this particular session with zope.sqlalchemy
     zope.sqlalchemy.register(session, transaction_manager=request.tm)
