@@ -48,10 +48,7 @@ from warehouse.packaging.models import (
     Release,
     Role,
 )
-from warehouse.packaging.tasks import (
-    sync_file_to_archive,
-    update_bigquery_release_files,
-)
+from warehouse.packaging.tasks import sync_file_to_cache, update_bigquery_release_files
 from warehouse.utils.security_policy import AuthenticationMethod
 
 from ...common.db.accounts import EmailFactory, UserFactory
@@ -72,19 +69,26 @@ def _get_tar_testdata(compression_type=""):
     return temp_f.getvalue()
 
 
+def _get_whl_testdata(name="fake_package", version="1.0"):
+    temp_f = io.BytesIO()
+    with zipfile.ZipFile(file=temp_f, mode="w") as zfp:
+        zfp.writestr(f"{name}-{version}.dist-info/METADATA", "Fake metadata")
+    return temp_f.getvalue()
+
+
+def _storage_hash(data):
+    return hashlib.blake2b(data, digest_size=256 // 8).hexdigest()
+
+
 _TAR_GZ_PKG_TESTDATA = _get_tar_testdata("gz")
 _TAR_GZ_PKG_MD5 = hashlib.md5(_TAR_GZ_PKG_TESTDATA).hexdigest()
 _TAR_GZ_PKG_SHA256 = hashlib.sha256(_TAR_GZ_PKG_TESTDATA).hexdigest()
-_TAR_GZ_PKG_STORAGE_HASH = hashlib.blake2b(
-    _TAR_GZ_PKG_TESTDATA, digest_size=256 // 8
-).hexdigest()
+_TAR_GZ_PKG_STORAGE_HASH = _storage_hash(_TAR_GZ_PKG_TESTDATA)
 
 _TAR_BZ2_PKG_TESTDATA = _get_tar_testdata("bz2")
 _TAR_BZ2_PKG_MD5 = hashlib.md5(_TAR_BZ2_PKG_TESTDATA).hexdigest()
 _TAR_BZ2_PKG_SHA256 = hashlib.sha256(_TAR_BZ2_PKG_TESTDATA).hexdigest()
-_TAR_BZ2_PKG_STORAGE_HASH = hashlib.blake2b(
-    _TAR_BZ2_PKG_TESTDATA, digest_size=256 // 8
-).hexdigest()
+_TAR_BZ2_PKG_STORAGE_HASH = _storage_hash(_TAR_BZ2_PKG_TESTDATA)
 
 
 class TestExcWithMessage:
@@ -1342,19 +1346,23 @@ class TestFileUpload:
         assert "\x00" not in db_request.POST["summary"]
 
     @pytest.mark.parametrize(
-        ("has_signature", "digests"),
+        ("digests",),
         [
-            (True, {"md5_digest": _TAR_GZ_PKG_MD5}),
-            (True, {"sha256_digest": _TAR_GZ_PKG_SHA256}),
-            (False, {"md5_digest": _TAR_GZ_PKG_MD5}),
-            (False, {"sha256_digest": _TAR_GZ_PKG_SHA256}),
+            ({"md5_digest": _TAR_GZ_PKG_MD5},),
+            ({"sha256_digest": _TAR_GZ_PKG_SHA256},),
+            ({"md5_digest": _TAR_GZ_PKG_MD5},),
+            ({"sha256_digest": _TAR_GZ_PKG_SHA256},),
             (
-                True,
-                {"md5_digest": _TAR_GZ_PKG_MD5, "sha256_digest": _TAR_GZ_PKG_SHA256},
+                {
+                    "md5_digest": _TAR_GZ_PKG_MD5,
+                    "sha256_digest": _TAR_GZ_PKG_SHA256,
+                },
             ),
             (
-                False,
-                {"md5_digest": _TAR_GZ_PKG_MD5, "sha256_digest": _TAR_GZ_PKG_SHA256},
+                {
+                    "md5_digest": _TAR_GZ_PKG_MD5,
+                    "sha256_digest": _TAR_GZ_PKG_SHA256,
+                },
             ),
         ],
     )
@@ -1364,7 +1372,6 @@ class TestFileUpload:
         monkeypatch,
         pyramid_config,
         db_request,
-        has_signature,
         digests,
         metrics,
     ):
@@ -1403,24 +1410,9 @@ class TestFileUpload:
         db_request.POST.extend([("classifiers", "Environment :: Other Environment")])
         db_request.POST.update(digests)
 
-        if has_signature:
-            gpg_signature = FieldStorage()
-            gpg_signature.filename = filename + ".asc"
-            gpg_signature.file = io.BytesIO(
-                b"-----BEGIN PGP SIGNATURE-----\n" b" This is a Fake Signature"
-            )
-            db_request.POST["gpg_signature"] = gpg_signature
-            assert isinstance(db_request.POST["gpg_signature"], FieldStorage)
-
         @pretend.call_recorder
         def storage_service_store(path, file_path, *, meta):
-            if file_path.endswith(".asc"):
-                expected = (
-                    b"-----BEGIN PGP SIGNATURE-----\n" b" This is a Fake Signature"
-                )
-            else:
-                expected = _TAR_GZ_PKG_TESTDATA
-
+            expected = _TAR_GZ_PKG_TESTDATA
             with open(file_path, "rb") as fp:
                 assert fp.read() == expected
 
@@ -1440,9 +1432,9 @@ class TestFileUpload:
         assert resp.status_code == 200
         assert db_request.find_service.calls == [
             pretend.call(IMetricsService, context=None),
-            pretend.call(IFileStorage, name="primary"),
+            pretend.call(IFileStorage, name="archive"),
         ]
-        assert len(storage_service.store.calls) == 2 if has_signature else 1
+        assert len(storage_service.store.calls) == 1
         assert storage_service.store.calls[0] == pretend.call(
             "/".join(
                 [
@@ -1460,25 +1452,6 @@ class TestFileUpload:
                 "python-version": "source",
             },
         )
-
-        if has_signature:
-            assert storage_service.store.calls[1] == pretend.call(
-                "/".join(
-                    [
-                        _TAR_GZ_PKG_STORAGE_HASH[:2],
-                        _TAR_GZ_PKG_STORAGE_HASH[2:4],
-                        _TAR_GZ_PKG_STORAGE_HASH[4:],
-                        filename + ".asc",
-                    ]
-                ),
-                mock.ANY,
-                meta={
-                    "project": project.normalized_name,
-                    "version": release.version,
-                    "package-type": "sdist",
-                    "python-version": "source",
-                },
-            )
 
         # Ensure that a File object has been created.
         uploaded_file = (
@@ -1514,7 +1487,7 @@ class TestFileUpload:
 
         assert db_request.task.calls == [
             pretend.call(update_bigquery_release_files),
-            pretend.call(sync_file_to_archive),
+            pretend.call(sync_file_to_cache),
         ]
 
         assert metrics.increment.calls == [
@@ -1679,44 +1652,6 @@ class TestFileUpload:
 
         assert resp.status_code == 400
         assert resp.status == "400 Only one sdist may be uploaded per release."
-
-    @pytest.mark.parametrize("sig", [b"lol nope"])
-    def test_upload_fails_with_invalid_signature(self, pyramid_config, db_request, sig):
-        user = UserFactory.create()
-        pyramid_config.testing_securitypolicy(identity=user)
-        db_request.user = user
-        EmailFactory.create(user=user)
-        project = ProjectFactory.create()
-        release = ReleaseFactory.create(project=project, version="1.0")
-        RoleFactory.create(user=user, project=project)
-
-        filename = f"{project.name}-{release.version}.tar.gz"
-
-        db_request.POST = MultiDict(
-            {
-                "metadata_version": "1.2",
-                "name": project.name,
-                "version": release.version,
-                "filetype": "sdist",
-                "md5_digest": _TAR_GZ_PKG_MD5,
-                "content": pretend.stub(
-                    filename=filename,
-                    file=io.BytesIO(_TAR_GZ_PKG_TESTDATA),
-                    type="application/tar",
-                ),
-                "gpg_signature": pretend.stub(
-                    filename=filename + ".asc", file=io.BytesIO(sig)
-                ),
-            }
-        )
-
-        with pytest.raises(HTTPBadRequest) as excinfo:
-            legacy.file_upload(db_request)
-
-        resp = excinfo.value
-
-        assert resp.status_code == 400
-        assert resp.status == "400 PGP signature isn't ASCII armored."
 
     def test_upload_fails_with_invalid_classifier(self, pyramid_config, db_request):
         user = UserFactory.create()
@@ -2204,44 +2139,6 @@ class TestFileUpload:
                 db_request.remote_addr,
             ),
         ]
-
-    def test_upload_fails_with_too_large_signature(self, pyramid_config, db_request):
-        user = UserFactory.create()
-        pyramid_config.testing_securitypolicy(identity=user)
-        db_request.user = user
-        EmailFactory.create(user=user)
-        project = ProjectFactory.create()
-        release = ReleaseFactory.create(project=project, version="1.0")
-        RoleFactory.create(user=user, project=project)
-
-        filename = f"{project.name}-{release.version}.tar.gz"
-
-        db_request.POST = MultiDict(
-            {
-                "metadata_version": "1.2",
-                "name": project.name,
-                "version": release.version,
-                "filetype": "sdist",
-                "md5_digest": _TAR_GZ_PKG_MD5,
-                "content": pretend.stub(
-                    filename=filename,
-                    file=io.BytesIO(_TAR_GZ_PKG_TESTDATA),
-                    type="application/tar",
-                ),
-                "gpg_signature": pretend.stub(
-                    filename=filename + ".asc",
-                    file=io.BytesIO(b"a" * (legacy.MAX_FILESIZE + 1)),
-                ),
-            }
-        )
-
-        with pytest.raises(HTTPBadRequest) as excinfo:
-            legacy.file_upload(db_request)
-
-        resp = excinfo.value
-
-        assert resp.status_code == 400
-        assert resp.status == "400 Signature too large."
 
     def test_upload_fails_with_previously_used_filename(
         self, pyramid_config, db_request
@@ -2771,6 +2668,8 @@ class TestFileUpload:
         RoleFactory.create(user=user, project=project)
 
         filename = f"{project.name}-{release.version}-cp34-none-{plat}.whl"
+        filebody = _get_whl_testdata(name=project.name, version=release.version)
+        filestoragehash = _storage_hash(filebody)
 
         pyramid_config.testing_securitypolicy(identity=user)
         db_request.user = user
@@ -2782,11 +2681,11 @@ class TestFileUpload:
                 "version": release.version,
                 "filetype": "bdist_wheel",
                 "pyversion": "cp34",
-                "md5_digest": _TAR_GZ_PKG_MD5,
+                "md5_digest": hashlib.md5(filebody).hexdigest(),
                 "content": pretend.stub(
                     filename=filename,
-                    file=io.BytesIO(_TAR_GZ_PKG_TESTDATA),
-                    type="application/tar",
+                    file=io.BytesIO(filebody),
+                    type="application/zip",
                 ),
             }
         )
@@ -2794,7 +2693,10 @@ class TestFileUpload:
         @pretend.call_recorder
         def storage_service_store(path, file_path, *, meta):
             with open(file_path, "rb") as fp:
-                assert fp.read() == _TAR_GZ_PKG_TESTDATA
+                if file_path.endswith(".metadata"):
+                    assert fp.read() == b"Fake metadata"
+                else:
+                    assert fp.read() == filebody
 
         storage_service = pretend.stub(store=storage_service_store)
 
@@ -2812,15 +2714,15 @@ class TestFileUpload:
         assert resp.status_code == 200
         assert db_request.find_service.calls == [
             pretend.call(IMetricsService, context=None),
-            pretend.call(IFileStorage, name="primary"),
+            pretend.call(IFileStorage, name="archive"),
         ]
         assert storage_service.store.calls == [
             pretend.call(
                 "/".join(
                     [
-                        _TAR_GZ_PKG_STORAGE_HASH[:2],
-                        _TAR_GZ_PKG_STORAGE_HASH[2:4],
-                        _TAR_GZ_PKG_STORAGE_HASH[4:],
+                        filestoragehash[:2],
+                        filestoragehash[2:4],
+                        filestoragehash[4:],
                         filename,
                     ]
                 ),
@@ -2831,7 +2733,24 @@ class TestFileUpload:
                     "package-type": "bdist_wheel",
                     "python-version": "cp34",
                 },
-            )
+            ),
+            pretend.call(
+                "/".join(
+                    [
+                        filestoragehash[:2],
+                        filestoragehash[2:4],
+                        filestoragehash[4:],
+                        filename + ".metadata",
+                    ]
+                ),
+                mock.ANY,
+                meta={
+                    "project": project.normalized_name,
+                    "version": release.version,
+                    "package-type": "bdist_wheel",
+                    "python-version": "cp34",
+                },
+            ),
         ]
 
         # Ensure that a File object has been created.
@@ -2884,6 +2803,8 @@ class TestFileUpload:
         RoleFactory.create(user=user, project=project)
 
         filename = f"{project.name}-{release.version}-cp34-none-any.whl"
+        filebody = _get_whl_testdata(name=project.name, version=release.version)
+        filestoragehash = _storage_hash(filebody)
 
         pyramid_config.testing_securitypolicy(identity=user)
         db_request.user = user
@@ -2895,11 +2816,11 @@ class TestFileUpload:
                 "version": release.version,
                 "filetype": "bdist_wheel",
                 "pyversion": "cp34",
-                "md5_digest": "335c476dc930b959dda9ec82bd65ef19",
+                "md5_digest": hashlib.md5(filebody).hexdigest(),
                 "content": pretend.stub(
                     filename=filename,
-                    file=io.BytesIO(b"A fake file."),
-                    type="application/tar",
+                    file=io.BytesIO(filebody),
+                    type="application/zip",
                 ),
             }
         )
@@ -2907,7 +2828,10 @@ class TestFileUpload:
         @pretend.call_recorder
         def storage_service_store(path, file_path, *, meta):
             with open(file_path, "rb") as fp:
-                assert fp.read() == b"A fake file."
+                if file_path.endswith(".metadata"):
+                    assert fp.read() == b"Fake metadata"
+                else:
+                    assert fp.read() == filebody
 
         storage_service = pretend.stub(store=storage_service_store)
         db_request.find_service = pretend.call_recorder(
@@ -2924,15 +2848,15 @@ class TestFileUpload:
         assert resp.status_code == 200
         assert db_request.find_service.calls == [
             pretend.call(IMetricsService, context=None),
-            pretend.call(IFileStorage, name="primary"),
+            pretend.call(IFileStorage, name="archive"),
         ]
         assert storage_service.store.calls == [
             pretend.call(
                 "/".join(
                     [
-                        "4e",
-                        "6e",
-                        "fa4c0ee2bbad071b4f5b5ea68f1aea89fa716e7754eb13e2314d45a5916e",
+                        filestoragehash[:2],
+                        filestoragehash[2:4],
+                        filestoragehash[4:],
                         filename,
                     ]
                 ),
@@ -2943,7 +2867,24 @@ class TestFileUpload:
                     "package-type": "bdist_wheel",
                     "python-version": "cp34",
                 },
-            )
+            ),
+            pretend.call(
+                "/".join(
+                    [
+                        filestoragehash[:2],
+                        filestoragehash[2:4],
+                        filestoragehash[4:],
+                        filename + ".metadata",
+                    ]
+                ),
+                mock.ANY,
+                meta={
+                    "project": project.normalized_name,
+                    "version": release.version,
+                    "package-type": "bdist_wheel",
+                    "python-version": "cp34",
+                },
+            ),
         ]
 
         # Ensure that a File object has been created.
@@ -3023,6 +2964,55 @@ class TestFileUpload:
         assert resp.status_code == 400
         assert re.match(
             "400 Binary wheel .* has an unsupported platform tag .*", resp.status
+        )
+
+    def test_upload_fails_with_missing_metadata_wheel(
+        self, monkeypatch, pyramid_config, db_request
+    ):
+        user = UserFactory.create()
+        pyramid_config.testing_securitypolicy(identity=user)
+        db_request.user = user
+        EmailFactory.create(user=user)
+        project = ProjectFactory.create()
+        release = ReleaseFactory.create(project=project, version="1.0")
+        RoleFactory.create(user=user, project=project)
+
+        temp_f = io.BytesIO()
+        with zipfile.ZipFile(file=temp_f, mode="w") as zfp:
+            zfp.writestr(
+                f"{project.name.lower()}-{release.version}.dist-info/METADATA",
+                "Fake metadata",
+            )
+
+        filename = f"{project.name}-{release.version}-cp34-none-any.whl"
+        filebody = temp_f.getvalue()
+
+        db_request.POST = MultiDict(
+            {
+                "metadata_version": "1.2",
+                "name": project.name,
+                "version": release.version,
+                "filetype": "bdist_wheel",
+                "pyversion": "cp34",
+                "md5_digest": hashlib.md5(filebody).hexdigest(),
+                "content": pretend.stub(
+                    filename=filename,
+                    file=io.BytesIO(filebody),
+                    type="application/zip",
+                ),
+            }
+        )
+
+        monkeypatch.setattr(legacy, "_is_valid_dist_file", lambda *a, **kw: True)
+
+        with pytest.raises(HTTPBadRequest) as excinfo:
+            legacy.file_upload(db_request)
+
+        resp = excinfo.value
+
+        assert resp.status_code == 400
+        assert re.match(
+            "400 Wheel .* does not contain the required METADATA file: .*", resp.status
         )
 
     def test_upload_updates_existing_project_name(
@@ -3494,6 +3484,55 @@ class TestFileUpload:
                 user,
                 db_request.remote_addr,
             ),
+        ]
+
+    def test_upload_succeeds_with_signature(
+        self, pyramid_config, db_request, metrics, project_service, monkeypatch
+    ):
+        user = UserFactory.create()
+        EmailFactory.create(user=user)
+
+        filename = "{}-{}.tar.gz".format("example", "1.0")
+
+        pyramid_config.testing_securitypolicy(identity=user)
+        db_request.user = user
+        db_request.POST = MultiDict(
+            {
+                "metadata_version": "1.2",
+                "name": "example",
+                "version": "1.0",
+                "filetype": "sdist",
+                "md5_digest": _TAR_GZ_PKG_MD5,
+                "content": pretend.stub(
+                    filename=filename,
+                    file=io.BytesIO(_TAR_GZ_PKG_TESTDATA),
+                    type="application/tar",
+                ),
+                "gpg_signature": "...",
+            }
+        )
+
+        storage_service = pretend.stub(store=lambda path, filepath, meta: None)
+        db_request.find_service = lambda svc, name=None, context=None: {
+            IFileStorage: storage_service,
+            IMetricsService: metrics,
+            IProjectService: project_service,
+        }.get(svc)
+        db_request.user_agent = "warehouse-tests/6.6.6"
+
+        send_email = pretend.call_recorder(lambda *a, **kw: None)
+        monkeypatch.setattr(legacy, "send_gpg_signature_uploaded_email", send_email)
+
+        resp = legacy.file_upload(db_request)
+
+        assert resp.status_code == 200
+        assert resp.body == (
+            b"GPG signature support has been removed from PyPI and the provided "
+            b"signature has been discarded."
+        )
+
+        assert send_email.calls == [
+            pretend.call(db_request, user, project_name="example"),
         ]
 
     @pytest.mark.parametrize(

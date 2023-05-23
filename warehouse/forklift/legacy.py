@@ -48,7 +48,10 @@ from trove_classifiers import classifiers, deprecated_classifiers
 from warehouse import forms
 from warehouse.admin.flags import AdminFlagValue
 from warehouse.classifiers.models import Classifier
-from warehouse.email import send_basic_auth_with_two_factor_email
+from warehouse.email import (
+    send_basic_auth_with_two_factor_email,
+    send_gpg_signature_uploaded_email,
+)
 from warehouse.events.tags import EventTag
 from warehouse.metrics import IMetricsService
 from warehouse.packaging.interfaces import IFileStorage, IProjectService
@@ -62,10 +65,7 @@ from warehouse.packaging.models import (
     Project,
     Release,
 )
-from warehouse.packaging.tasks import (
-    sync_file_to_archive,
-    update_bigquery_release_files,
-)
+from warehouse.packaging.tasks import sync_file_to_cache, update_bigquery_release_files
 from warehouse.rate_limiting.interfaces import RateLimiterException
 from warehouse.utils import http, readme
 from warehouse.utils.project import PROJECT_NAME_RE, validate_project_name
@@ -794,6 +794,19 @@ def _is_duplicate_file(db_session, filename, hashes):
     return None
 
 
+def _extract_wheel_metadata(path):
+    """
+    Extract METADATA file from a wheel and return it as a content.
+    The name of the .whl file is used to find the corresponding .dist-info dir.
+    See https://peps.python.org/pep-0491/#file-contents
+    """
+    filename = os.path.basename(path)
+    namever = _wheel_file_re.match(filename).group("namever")
+    metafile = f"{namever}.dist-info/METADATA"
+    with zipfile.ZipFile(path) as zfp:
+        return zfp.read(metafile)
+
+
 @view_config(
     route_name="forklift.legacy.file_upload",
     uses_session=True,
@@ -802,6 +815,9 @@ def _is_duplicate_file(db_session, filename, hashes):
     has_translations=True,
 )
 def file_upload(request):
+    # This is a list of warnings that we'll emit *IF* the request is successful.
+    warnings = []
+
     # If we're in read-only mode, let upload clients know
     if request.flags.enabled(AdminFlagValue.READ_ONLY):
         raise _exc_with_message(
@@ -875,11 +891,10 @@ def file_upload(request):
         raise _exc_with_message(HTTPBadRequest, "Unknown protocol version.")
 
     # Check if any fields were supplied as a tuple and have become a
-    # FieldStorage. The 'content' and 'gpg_signature' fields _should_ be a
-    # FieldStorage, however.
+    # FieldStorage. The 'content' field _should_ be a FieldStorage, however.
     # ref: https://github.com/pypi/warehouse/issues/2185
     # ref: https://github.com/pypi/warehouse/issues/2491
-    for field in set(request.POST) - {"content", "gpg_signature"}:
+    for field in set(request.POST) - {"content"}:
         values = request.POST.getall(field)
         if any(isinstance(value, FieldStorage) for value in values):
             raise _exc_with_message(HTTPBadRequest, f"{field}: Should not be a tuple.")
@@ -1129,6 +1144,15 @@ def file_upload(request):
         )
         request.db.add(release)
 
+        if "gpg_signature" in request.POST:
+            warnings.append(
+                "GPG signature support has been removed from PyPI and the "
+                "provided signature has been discarded."
+            )
+            send_gpg_signature_uploaded_email(
+                request, request.user, project_name=project.name
+            )
+
         # TODO: This should be handled by some sort of database trigger or
         #       a SQLAlchemy hook or the like instead of doing it inline in
         #       this view.
@@ -1212,6 +1236,7 @@ def file_upload(request):
                 "sha256": hashlib.sha256(),
                 "blake2_256": hashlib.blake2b(digest_size=256 // 8),
             }
+            metadata_file_hashes = {}
             for chunk in iter(lambda: request.POST["content"].file.read(8096), b""):
                 file_size += len(chunk)
                 if file_size > file_size_limit:
@@ -1322,27 +1347,29 @@ def file_upload(request):
                         "platform tag '{plat}'.".format(filename=filename, plat=plat),
                     )
 
-        # Also buffer the entire signature file to disk.
-        if "gpg_signature" in request.POST:
-            has_signature = True
-            with open(os.path.join(tmpdir, filename + ".asc"), "wb") as fp:
-                signature_size = 0
-                for chunk in iter(
-                    lambda: request.POST["gpg_signature"].file.read(8096), b""
-                ):
-                    signature_size += len(chunk)
-                    if signature_size > MAX_SIGSIZE:
-                        raise _exc_with_message(HTTPBadRequest, "Signature too large.")
-                    fp.write(chunk)
-
-            # Check whether signature is ASCII armored
-            with open(os.path.join(tmpdir, filename + ".asc"), "rb") as fp:
-                if not fp.read().startswith(b"-----BEGIN PGP SIGNATURE-----"):
-                    raise _exc_with_message(
-                        HTTPBadRequest, "PGP signature isn't ASCII armored."
-                    )
-        else:
-            has_signature = False
+            try:
+                wheel_metadata_contents = _extract_wheel_metadata(temporary_filename)
+            except KeyError:
+                namever = wheel_info.group("namever")
+                metadata_filename = f"{namever}.dist-info/METADATA"
+                raise _exc_with_message(
+                    HTTPBadRequest,
+                    "Wheel '{filename}' does not contain the required "
+                    "METADATA file: {metadata_filename}".format(
+                        filename=filename, metadata_filename=metadata_filename
+                    ),
+                )
+            with open(temporary_filename + ".metadata", "wb") as fp:
+                fp.write(wheel_metadata_contents)
+            metadata_file_hashes = {
+                "sha256": hashlib.sha256(),
+                "blake2_256": hashlib.blake2b(digest_size=256 // 8),
+            }
+            for hasher in metadata_file_hashes.values():
+                hasher.update(wheel_metadata_contents)
+            metadata_file_hashes = {
+                k: h.hexdigest().lower() for k, h in metadata_file_hashes.items()
+            }
 
         # TODO: This should be handled by some sort of database trigger or a
         #       SQLAlchemy hook or the like instead of doing it inline in this
@@ -1357,10 +1384,11 @@ def file_upload(request):
             packagetype=form.filetype.data,
             comment_text=form.comment.data,
             size=file_size,
-            has_signature=bool(has_signature),
             md5_digest=file_hashes["md5"],
             sha256_digest=file_hashes["sha256"],
             blake2_256_digest=file_hashes["blake2_256"],
+            metadata_file_sha256_digest=metadata_file_hashes.get("sha256"),
+            metadata_file_blake2_256_digest=metadata_file_hashes.get("blake2_256"),
             # Figure out what our filepath is going to be, we're going to use a
             # directory structure based on the hash of the file contents. This
             # will ensure that the contents of the file cannot change without
@@ -1413,7 +1441,7 @@ def file_upload(request):
         #       this won't take affect until after a commit has happened, for
         #       now we'll just ignore it and save it before the transaction is
         #       committed.
-        storage = request.find_service(IFileStorage, name="primary")
+        storage = request.find_service(IFileStorage, name="archive")
         storage.store(
             file_.path,
             os.path.join(tmpdir, filename),
@@ -1424,10 +1452,11 @@ def file_upload(request):
                 "python-version": file_.python_version,
             },
         )
-        if has_signature:
+
+        if metadata_file_hashes:
             storage.store(
-                file_.pgp_path,
-                os.path.join(tmpdir, filename + ".asc"),
+                file_.metadata_path,
+                os.path.join(tmpdir, filename + ".metadata"),
                 meta={
                     "project": file_.release.project.normalized_name,
                     "version": file_.release.version,
@@ -1473,7 +1502,7 @@ def file_upload(request):
         "packagetype": file_data.packagetype,
         "comment_text": file_data.comment_text,
         "size": file_data.size,
-        "has_signature": file_data.has_signature,
+        "has_signature": False,
         "md5_digest": file_data.md5_digest,
         "sha256_digest": file_data.sha256_digest,
         "blake2_256_digest": file_data.blake2_256_digest,
@@ -1487,10 +1516,11 @@ def file_upload(request):
     # Log a successful upload
     metrics.increment("warehouse.upload.ok", tags=[f"filetype:{form.filetype.data}"])
 
-    # Dispatch our archive task to sync this as soon as possible
-    request.task(sync_file_to_archive).delay(file_.id)
+    # Dispatch our task to sync this to cache as soon as possible
+    request.task(sync_file_to_cache).delay(file_.id)
 
-    return Response()
+    # Return any warnings that we've accumulated as the response body.
+    return Response("\n".join(warnings))
 
 
 def _legacy_purge(status, *args, **kwargs):

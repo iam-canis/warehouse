@@ -21,6 +21,7 @@ google-cloud-bigquery
 google-cloud-storage
 hiredis
 html5lib
+humanize
 itsdangerous
 Jinja2>=2.8
 limits
@@ -70,6 +71,5 @@ typeguard
 webauthn>=1.0.0,<2.0.0
 whitenoise
 WTForms[email]>=2.0.0
-yara-python
 zope.sqlalchemy
 zxcvbn

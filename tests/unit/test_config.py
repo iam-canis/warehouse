@@ -267,6 +267,7 @@ def test_configure(monkeypatch, settings, environment):
         "warehouse.oidc.enabled": False,
         "oidc.backend": "warehouse.oidc.services.OIDCPublisherService",
         "warehouse.two_factor_mandate.cohort_size": 0,
+        "reconcile_file_storages.batch_size": 100,
     }
     if environment == config.Environment.development:
         expected_settings.update(
@@ -358,7 +359,6 @@ def test_configure(monkeypatch, settings, environment):
             pretend.call(".accounts"),
             pretend.call(".macaroons"),
             pretend.call(".oidc"),
-            pretend.call(".malware"),
             pretend.call(".manage"),
             pretend.call(".organizations"),
             pretend.call(".subscriptions"),

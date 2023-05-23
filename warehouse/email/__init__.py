@@ -320,6 +320,11 @@ def send_basic_auth_with_two_factor_email(request, user, *, project_name):
     return {"project_name": project_name}
 
 
+@_email("gpg-signature-uploaded", repeat_window=datetime.timedelta(days=1))
+def send_gpg_signature_uploaded_email(request, user, *, project_name):
+    return {"project_name": project_name}
+
+
 @_email("account-deleted")
 def send_account_deletion_email(request, user):
     return {"username": user.username}
@@ -987,7 +992,9 @@ def send_trusted_publisher_added_email(request, user, project_name, publisher):
         "username": request.user.username,
         "project_name": project_name,
         "publisher_name": publisher.publisher_name,
-        "publisher_spec": str(publisher),
+        "publisher_workflow": str(publisher),
+        "publisher_repository": publisher.repository_name,
+        "publisher_environment": publisher.environment,
     }
 
 
@@ -998,7 +1005,9 @@ def send_trusted_publisher_removed_email(request, user, project_name, publisher)
         "username": request.user.username,
         "project_name": project_name,
         "publisher_name": publisher.publisher_name,
-        "publisher_spec": str(publisher),
+        "publisher_workflow": str(publisher),
+        "publisher_repository": publisher.repository_name,
+        "publisher_environment": publisher.environment,
     }
 
 

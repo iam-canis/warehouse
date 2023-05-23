@@ -231,6 +231,13 @@ def configure(settings=None):
         coercer=int,
         default=21600,  # 6 hours
     )
+    maybe_set(
+        settings,
+        "reconcile_file_storages.batch_size",
+        "RECONCILE_FILE_STORAGES_BATCH_SIZE",
+        coercer=int,
+        default=100,
+    )
     maybe_set_compound(settings, "billing", "backend", "BILLING_BACKEND")
     maybe_set_compound(settings, "files", "backend", "FILES_BACKEND")
     maybe_set_compound(settings, "archive_files", "backend", "ARCHIVE_FILES_BACKEND")
@@ -241,7 +248,6 @@ def configure(settings=None):
     maybe_set_compound(settings, "mail", "backend", "MAIL_BACKEND")
     maybe_set_compound(settings, "metrics", "backend", "METRICS_BACKEND")
     maybe_set_compound(settings, "breached_passwords", "backend", "BREACHED_PASSWORDS")
-    maybe_set_compound(settings, "malware_check", "backend", "MALWARE_CHECK_BACKEND")
     maybe_set(
         settings,
         "oidc.backend",
@@ -463,7 +469,7 @@ def configure(settings=None):
     filters.setdefault("ctime", "warehouse.filters:ctime")
     filters.setdefault("is_recent", "warehouse.filters:is_recent")
     filters.setdefault("canonicalize_name", "packaging.utils:canonicalize_name")
-    filters.setdefault("format_author_email", "warehouse.filters:format_author_email")
+    filters.setdefault("format_email", "warehouse.filters:format_email")
     filters.setdefault(
         "remove_invalid_xml_unicode", "warehouse.filters:remove_invalid_xml_unicode"
     )
@@ -589,9 +595,6 @@ def configure(settings=None):
 
     # Register support for OIDC based authentication
     config.include(".oidc")
-
-    # Register support for malware checks
-    config.include(".malware")
 
     # Register logged-in views
     config.include(".manage")
