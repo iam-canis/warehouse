@@ -84,8 +84,10 @@ class Role(db.Model):
         nullable=False,
     )
 
-    user = orm.relationship(User, lazy=False)
-    project = orm.relationship("Project", lazy=False, back_populates="roles")
+    user = orm.relationship(User, cascade_backrefs=False, lazy=False)
+    project = orm.relationship(
+        "Project", lazy=False, cascade_backrefs=False, back_populates="roles"
+    )
 
 
 class RoleInvitationStatus(enum.Enum):
@@ -203,17 +205,20 @@ class Project(SitemapMixin, TwoFactorRequireable, HasEvents, db.Model):
     roles = orm.relationship(
         Role,
         back_populates="project",
+        cascade_backrefs=False,
         passive_deletes=True,
     )
     team_project_roles = orm.relationship(
         TeamProjectRole,
         back_populates="project",
+        cascade_backrefs=False,
         passive_deletes=True,
     )
     users = orm.relationship(User, secondary=Role.__table__, backref="projects", viewonly=True)  # type: ignore # noqa
     releases = orm.relationship(
         "Release",
         backref="project",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         order_by=lambda: Release._pypi_ordering.desc(),  # type: ignore
         passive_deletes=True,
@@ -465,6 +470,7 @@ class Release(db.Model):
         backref=orm.backref(
             "release",
             cascade="all, delete-orphan",
+            cascade_backrefs=False,
             passive_deletes=True,
             passive_updates=True,
             single_parent=True,
@@ -479,6 +485,7 @@ class Release(db.Model):
     _classifiers = orm.relationship(
         Classifier,
         backref="project_releases",
+        cascade_backrefs=False,
         secondary=lambda: release_classifiers,  # type: ignore
         order_by=Classifier.ordering,
         passive_deletes=True,
@@ -488,6 +495,7 @@ class Release(db.Model):
     _project_urls = orm.relationship(
         ReleaseURL,
         backref="release",
+        cascade_backrefs=False,
         collection_class=attribute_mapped_collection("name"),
         cascade="all, delete-orphan",
         order_by=lambda: ReleaseURL.name.asc(),
@@ -502,6 +510,7 @@ class Release(db.Model):
     files = orm.relationship(
         "File",
         backref="release",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         lazy="dynamic",
         order_by=lambda: File.filename,  # type: ignore
@@ -511,6 +520,7 @@ class Release(db.Model):
     dependencies = orm.relationship(
         "Dependency",
         backref="release",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         passive_deletes=True,
     )

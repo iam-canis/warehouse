@@ -246,6 +246,7 @@ class EmailMessage(db.Model):
     events = orm.relationship(
         "Event",
         backref="email",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         lazy=False,
         order_by=lambda: Event.created,  # type: ignore

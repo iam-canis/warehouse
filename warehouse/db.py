@@ -173,6 +173,7 @@ def includeme(config):
         pool_size=35,
         max_overflow=65,
         pool_timeout=20,
+        future=True,
     )
 
     # Register our request.db property

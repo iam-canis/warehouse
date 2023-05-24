@@ -72,11 +72,13 @@ class Event(AbstractConcreteBase):
 
     @declared_attr
     def source(cls):  # noqa: N805
-        return orm.relationship(cls._parent_class, back_populates="events")
+        return orm.relationship(
+            cls._parent_class, back_populates="events", cascade_backrefs=False
+        )
 
     @declared_attr
     def ip_address_obj(cls):  # noqa: N805
-        return orm.relationship(IpAddress)
+        return orm.relationship(IpAddress, cascade_backrefs=False)
 
     @hybrid_property
     def ip_address(cls):  # noqa: N805
@@ -119,6 +121,7 @@ class HasEvents:
         return orm.relationship(
             cls.Event,
             cascade="all, delete-orphan",
+            cascade_backrefs=True,  # We need to make this False
             passive_deletes=True,
             lazy="dynamic",
             back_populates="source",

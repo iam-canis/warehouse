@@ -95,20 +95,33 @@ class User(SitemapMixin, HasEvents, db.Model):
     last_totp_value = Column(String, nullable=True)
 
     webauthn = orm.relationship(
-        "WebAuthn", backref="user", cascade="all, delete-orphan", lazy=True
+        "WebAuthn",
+        backref="user",
+        cascade_backrefs=False,
+        cascade="all, delete-orphan",
+        lazy=True,
     )
 
     recovery_codes = orm.relationship(
-        "RecoveryCode", backref="user", cascade="all, delete-orphan", lazy="dynamic"
+        "RecoveryCode",
+        backref="user",
+        cascade_backrefs=False,
+        cascade="all, delete-orphan",
+        lazy="dynamic",
     )
 
     emails = orm.relationship(
-        "Email", backref="user", cascade="all, delete-orphan", lazy=False
+        "Email",
+        backref="user",
+        cascade_backrefs=False,
+        cascade="all, delete-orphan",
+        lazy=False,
     )
 
     macaroons = orm.relationship(
         "Macaroon",
         backref="user",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         lazy=True,
         order_by="Macaroon.created.desc()",
@@ -117,6 +130,7 @@ class User(SitemapMixin, HasEvents, db.Model):
     pending_oidc_publishers = orm.relationship(
         "PendingOIDCPublisher",
         backref="added_by",
+        cascade_backrefs=False,
         cascade="all, delete-orphan",
         lazy=True,
     )

@@ -191,9 +191,14 @@ class OIDCPublisher(OIDCPublisherMixin, db.Model):
         Project,
         secondary=OIDCPublisherProjectAssociation.__table__,  # type: ignore
         backref="oidc_publishers",
+        cascade_backrefs=False,
     )
     macaroons = orm.relationship(
-        Macaroon, backref="oidc_publisher", cascade="all, delete-orphan", lazy=True
+        Macaroon,
+        backref="oidc_publisher",
+        cascade_backrefs=False,
+        cascade="all, delete-orphan",
+        lazy=True,
     )
 
     __mapper_args__ = {

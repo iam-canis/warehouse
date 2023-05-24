@@ -261,6 +261,7 @@ class Organization(HasEvents, db.Model):
     teams = orm.relationship(
         "Team",
         back_populates="organization",
+        cascade_backrefs=False,
         order_by=lambda: Team.name.asc(),  # type: ignore
     )
     projects = orm.relationship(

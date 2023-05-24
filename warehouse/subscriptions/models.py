@@ -76,7 +76,9 @@ class StripeCustomer(db.Model):
         uselist=False,
         viewonly=True,
     )
-    subscriptions = orm.relationship("StripeSubscription", lazy=False)
+    subscriptions = orm.relationship(
+        "StripeSubscription", cascade_backrefs=False, lazy=False
+    )
 
 
 class StripeSubscription(db.Model):
@@ -113,9 +115,12 @@ class StripeSubscription(db.Model):
         nullable=False,
     )
 
-    subscription_price = orm.relationship("StripeSubscriptionPrice", lazy=False)
+    subscription_price = orm.relationship(
+        "StripeSubscriptionPrice", cascade_backrefs=False, lazy=False
+    )
     subscription_item = orm.relationship(
         "StripeSubscriptionItem",
+        cascade_backrefs=False,
         back_populates="subscription",
         lazy=False,
         uselist=False,
@@ -129,6 +134,7 @@ class StripeSubscription(db.Model):
     )
     customer = orm.relationship(
         "StripeCustomer",
+        cascade_backrefs=False,
         back_populates="subscriptions",
         lazy=False,
         uselist=False,
@@ -181,7 +187,9 @@ class StripeSubscriptionPrice(db.Model):
         Text, nullable=True
     )  # TODO: Enum? inclusive, exclusive, unspecified
 
-    subscription_product = orm.relationship("StripeSubscriptionProduct", lazy=False)
+    subscription_product = orm.relationship(
+        "StripeSubscriptionProduct", cascade_backrefs=False, lazy=False
+    )
 
 
 class StripeSubscriptionItem(db.Model):
@@ -209,6 +217,11 @@ class StripeSubscriptionItem(db.Model):
     quantity = Column(Integer, nullable=False)  # positive integer or zero
 
     subscription = orm.relationship(
-        "StripeSubscription", lazy=False, back_populates="subscription_item"
+        "StripeSubscription",
+        lazy=False,
+        back_populates="subscription_item",
+        cascade_backrefs=False,
     )
-    subscription_price = orm.relationship("StripeSubscriptionPrice", lazy=False)
+    subscription_price = orm.relationship(
+        "StripeSubscriptionPrice", lazy=False, cascade_backrefs=False
+    )

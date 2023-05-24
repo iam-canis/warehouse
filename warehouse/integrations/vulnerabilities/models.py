@@ -73,6 +73,7 @@ class VulnerabilityRecord(db.Model):
     releases = orm.relationship(
         "Release",
         back_populates="vulnerabilities",
+        cascade_backrefs=False,
         secondary=lambda: release_vulnerabilities,
         passive_deletes=True,
     )
